@@ -20,7 +20,6 @@ async function callClaude(system, userMsg, apiKey) {
   });
   const data = await res.json();
 
-  // Extract from mcp_tool_result blocks first
   for (const block of (data.content || [])) {
     if (block.type === 'mcp_tool_result') {
       try {
@@ -30,7 +29,6 @@ async function callClaude(system, userMsg, apiKey) {
     }
   }
 
-  // Fallback: parse text response
   const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const clean = text.replace(/```json|```/g, '').trim();
   try { return JSON.parse(clean); } catch (e) { return { _raw: text }; }
@@ -50,7 +48,6 @@ export default async function handler(req, res) {
     const phoneE164 = '+1' + phone.replace(/\D/g, '');
     const validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-    // â”€â”€ Step 1: Create or return existing customer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const customerResult = await callClaude(
       'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
       `Call flyra_create_customer with these exact parameters:
@@ -68,7 +65,6 @@ if_exists: "return"`,
       throw new Error('Could not create customer');
     }
 
-    // â”€â”€ Step 2: Create estimate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const lineItemsJson = JSON.stringify(lineItems);
     const estimateResult = await callClaude(
       'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
@@ -87,7 +83,6 @@ valid_until: "${validUntil}"`,
       throw new Error('Could not create estimate');
     }
 
-    // â”€â”€ Step 3: Get estimate public link â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const linkResult = await callClaude(
       'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
       `Call flyra_get_estimate_link with estimate_id: "${estimateId}"`,
@@ -96,9 +91,8 @@ valid_until: "${validUntil}"`,
 
     const estimateUrl = linkResult?.public_link || linkResult?.url || linkResult?.link || '';
 
-    // â”€â”€ Step 4: Send SMS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const totalDisplay = typeof total === 'number' ? `$${total}/visit` : total;
-    const smsBody = `Hi ${firstName}! Thanks for reaching out to Blue Arrow Cleaning ðŸªŸ\n\nYour quote for ${services} is ready:\nðŸ’° ${totalDisplay} (${freq})\n\nTap the link below to review your quote and book your appointment:\n${estimateUrl || 'Check your email for your estimate link.'}\n\nQuestions? Call us: (312) 835-6436`;
+    const smsBody = `Hi ${firstName}! Thanks for reaching out to Blue Arrow Cleaning 🪟\n\nYour quote for ${services} is ready:\n💰 ${totalDisplay} (${freq})\n\nTap the link below to review your quote and book your appointment:\n${estimateUrl || 'Check your email for your estimate link.'}\n\nQuestions? Call us: (312) 835-6436`;
 
     await callClaude(
       'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
@@ -108,7 +102,6 @@ body: ${JSON.stringify(smsBody)}`,
       apiKey
     );
 
-    // â”€â”€ Step 5: Mark estimate as sent â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     await callClaude(
       'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
       `Call flyra_send_estimate with estimate_id: "${estimateId}"`,
