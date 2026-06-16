@@ -1,6 +1,7 @@
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const MCP_SERVER = { type: 'url', url: 'https://mcp.flyra.io/mcp', name: 'flyra' };
 
-async function callFlyra(prompt, apiKey) {
+async function callClaude(system, userMsg, apiKey) {
   const res = await fetch(ANTHROPIC_API_URL, {
     method: 'POST',
     headers: {
@@ -11,18 +12,15 @@ async function callFlyra(prompt, apiKey) {
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
-      max_tokens: 2000,
-      system: `You are a Flyra assistant for Blue Arrow Cleaning. 
-Complete the requested Flyra actions exactly as described.
-Return ONLY raw JSON with no markdown, no explanation.`,
-      messages: [{ role: 'user', content: prompt }],
-      mcp_servers: [{ type: 'url', url: 'https://mcp.flyra.io/mcp', name: 'flyra' }],
+      max_tokens: 1024,
+      system,
+      messages: [{ role: 'user', content: userMsg }],
+      mcp_servers: [MCP_SERVER],
     }),
   });
-  return res.json();
-}
+  const data = await res.json();
 
-function extractToolResult(data) {
+  // Extract from mcp_tool_result blocks first
   for (const block of (data.content || [])) {
     if (block.type === 'mcp_tool_result') {
       try {
@@ -31,9 +29,11 @@ function extractToolResult(data) {
       } catch (e) {}
     }
   }
+
+  // Fallback: parse text response
   const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const clean = text.replace(/```json|```/g, '').trim();
-  try { return JSON.parse(clean); } catch (e) { return null; }
+  try { return JSON.parse(clean); } catch (e) { return { _raw: text }; }
 }
 
 export default async function handler(req, res) {
@@ -47,69 +47,78 @@ export default async function handler(req, res) {
   const { firstName, lastName, phone, address, lineItems, total, services, freq } = req.body || {};
 
   try {
-    // Step 1: Create or find customer
-    const customerData = await callFlyra(
-      `Search for an existing customer in Flyra with phone "${phone}".
-If found, return their id. If not found, create a new customer with:
-first_name: "${firstName}"
-last_name: "${lastName}"  
-mobile_phone: "${phone}"
-address: "${address}"
-Return ONLY: {"customer_id": "<id>"}`,
-      apiKey
-    );
-    const parsed = extractToolResult(customerData);
-    const customerId = parsed?.customer_id || parsed?.id;
-    if (!customerId) throw new Error('Could not create customer');
-
-    // Step 2: Create estimate with line items
-    const lineItemsStr = JSON.stringify(lineItems);
+    const phoneE164 = '+1' + phone.replace(/\D/g, '');
     const validUntil = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-    const estimateData = await callFlyra(
-      `Create a Flyra estimate for customer_id "${customerId}" with:
-subject: "Window Cleaning Quote – ${services}"
-line_items: ${lineItemsStr}
+    // â”€â”€ Step 1: Create or return existing customer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const customerResult = await callClaude(
+      'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
+      `Call flyra_create_customer with these exact parameters:
+first_name: "${firstName}"
+last_name: "${lastName}"
+mobile_phone: "${phoneE164}"
+address: "${address}"
+if_exists: "return"`,
+      apiKey
+    );
+
+    const customerId = customerResult?.id || customerResult?.customer_id;
+    if (!customerId) {
+      console.error('Customer creation failed:', JSON.stringify(customerResult));
+      throw new Error('Could not create customer');
+    }
+
+    // â”€â”€ Step 2: Create estimate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const lineItemsJson = JSON.stringify(lineItems);
+    const estimateResult = await callClaude(
+      'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
+      `Call flyra_create_estimate with these exact parameters:
+customer_id: "${customerId}"
+subject: "Window Cleaning Quote"
+line_items: ${lineItemsJson}
 notes: "Frequency: ${freq}. Address: ${address}. Quote submitted via website form."
-valid_until: "${validUntil}"
-Return ONLY: {"estimate_id": "<id>"}`,
+valid_until: "${validUntil}"`,
       apiKey
     );
-    const estParsed = extractToolResult(estimateData);
-    const estimateId = estParsed?.estimate_id || estParsed?.id;
-    if (!estimateId) throw new Error('Could not create estimate');
 
-    // Step 3: Get estimate link
-    const linkData = await callFlyra(
-      `Call flyra_get_estimate_link for estimate_id "${estimateId}".
-Return ONLY: {"url": "<link>"}`,
+    const estimateId = estimateResult?.id || estimateResult?.estimate_id;
+    if (!estimateId) {
+      console.error('Estimate creation failed:', JSON.stringify(estimateResult));
+      throw new Error('Could not create estimate');
+    }
+
+    // â”€â”€ Step 3: Get estimate public link â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const linkResult = await callClaude(
+      'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
+      `Call flyra_get_estimate_link with estimate_id: "${estimateId}"`,
       apiKey
     );
-    const linkParsed = extractToolResult(linkData);
-    const estimateUrl = linkParsed?.url || linkParsed?.link || linkParsed?.estimate_url || linkParsed?.public_link;
 
-    // Step 4: Send SMS to customer
-    const phoneE164 = '+1' + phone.replace(/\D/g, '');
-    const smsBody = `Hi ${firstName}! Thanks for reaching out to Blue Arrow Cleaning 🪟\n\nYour quote for ${services} is ready:\n💰 Total: $${total}/visit (${freq})\n\nTap below to review your quote and book your appointment:\n${estimateUrl || 'We\'ll follow up shortly with your estimate link.'}\n\nQuestions? Call us: (312) 835-6436`;
+    const estimateUrl = linkResult?.public_link || linkResult?.url || linkResult?.link || '';
 
-    await callFlyra(
-      `Send an SMS using flyra_send_sms with:
+    // â”€â”€ Step 4: Send SMS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const totalDisplay = typeof total === 'number' ? `$${total}/visit` : total;
+    const smsBody = `Hi ${firstName}! Thanks for reaching out to Blue Arrow Cleaning ðŸªŸ\n\nYour quote for ${services} is ready:\nðŸ’° ${totalDisplay} (${freq})\n\nTap the link below to review your quote and book your appointment:\n${estimateUrl || 'Check your email for your estimate link.'}\n\nQuestions? Call us: (312) 835-6436`;
+
+    await callClaude(
+      'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
+      `Call flyra_send_sms with:
 to_phone: "${phoneE164}"
-body: ${JSON.stringify(smsBody)}
-Return ONLY: {"success": true}`,
+body: ${JSON.stringify(smsBody)}`,
       apiKey
     );
 
-    // Step 5: Mark estimate as sent
-    await callFlyra(
-      `Call flyra_send_estimate with estimate_id "${estimateId}". Return ONLY: {"success": true}`,
+    // â”€â”€ Step 5: Mark estimate as sent â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    await callClaude(
+      'You are a Flyra API assistant. Call the requested Flyra tool with EXACTLY the parameters given. Return ONLY the raw JSON tool result with no extra text.',
+      `Call flyra_send_estimate with estimate_id: "${estimateId}"`,
       apiKey
     );
 
     return res.status(200).json({ success: true });
 
   } catch (err) {
-    console.error(err);
+    console.error('Proxy error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 }
